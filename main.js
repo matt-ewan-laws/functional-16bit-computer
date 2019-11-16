@@ -33,8 +33,8 @@ const mem = {};
 mem.get = (address, state) => state.getIn(["memory", address]) || 0;
 
 mem.get16 = (address, state) => {
-  const first = state.getIn(["memory", address]);
-  const second = state.getIn(["memory", address + 1]);
+  const first = state.getIn(["memory", address]) || 0;
+  const second = state.getIn(["memory", address + 1]) || 0;
   // smoosh them together
   return (first << 8) | second;
 };
@@ -50,7 +50,10 @@ mem.set16 = (address, value, state) => {
 };
 
 mem.show = (address, length, state) => {
-  return state.slice(address, address + length).toArray();
+  return state
+    .get("memory")
+    .slice(address, address + length)
+    .toArray();
 };
 
 mem.setBlock = (address, values, state) => {
@@ -104,39 +107,47 @@ ops.movLitReg = state => {
   state.get("registers");
   const [firstState, literal] = cpu.fetch16(state);
   const [fetchedState, registerRaw] = cpu.fetch(firstState);
-  const register = (registerRaw % REGISTER_COUNT) * 2;
+  const register = registerRaw % REGISTER_COUNT;
   return fetchedState.setIn(["registers", register], literal);
 };
 
 ops.movRegReg = state => {
   const [fromState, registerFromRaw] = cpu.fetch(state);
   const [fetchedState, registerToRaw] = cpu.fetch(fromState);
-  const registerFrom = (registerFromRaw % REGISTER_COUNT) * 2;
-  const registerTo = (registerToRaw % REGISTER_COUNT) * 2;
-  const value = fetchedState.getIn(["registers", registerFrom]);
+  const registerFrom = registerFromRaw % REGISTER_COUNT;
+  const registerTo = registerToRaw % REGISTER_COUNT;
+  const value = fetchedState.getIn(["registers", registerFrom]) || 0;
   return fetchedState.setIn(["registers", registerTo], value);
 };
 
 ops.movRegMem = state => {
   const [fromState, registerFromRaw] = cpu.fetch(state);
-  const registerFrom = (registerFromRaw % REGISTER_COUNT) * 2;
+  const registerFrom = registerFromRaw % REGISTER_COUNT;
   const [fetchedState, address] = cpu.fetch16(fromState);
-  const value = mem.get16(registerFrom, state);
+  const value = state.getIn(["registers", registerFrom]);
   return mem.set16(address, value, fetchedState);
 };
 
-ops.addRegMem = state => {
+ops.movMemReg = state => {
+  const [addressState, address] = cpu.fetch16(state);
+  const [fetchState, registerToRaw] = cpu.fetch(addressState);
+  const register = registerToRaw % REGISTER_COUNT;
+  const value = mem.get16(address, state);
+  return fetchState.setIn(["registers", register], value);
+};
+
+ops.addRegReg = state => {
   const [r1FetchState, r1] = cpu.fetch(state);
   const [fetchedState, r2] = cpu.fetch(r1FetchState);
-  const registerValue1 = fetchedState.getIn(["registers", r1 * 2]);
-  const registerValue2 = fetchedState.getIn(["registers", r2 * 2]);
+  const registerValue1 = fetchedState.getIn(["registers", r1]) || 0;
+  const registerValue2 = fetchedState.getIn(["registers", r2]) || 0;
   return cpu.setRegister("acc", registerValue1 + registerValue2, fetchedState);
 };
 
 ops.jmpNotEq = state => {
   const [valueState, value] = cpu.fetch16(state);
   const [fetchedState, address] = cpu.fetch16(valueState);
-  return value !== cpu.getRegister("acc", state)
+  return value !== cpu.getRegister("acc", fetchedState)
     ? cpu.setRegister("ip", address, fetchedState)
     : fetchedState;
 };
@@ -144,9 +155,10 @@ ops.jmpNotEq = state => {
 cpu.execute = (instruction, state) => {
   const instructionMap = [
     [opCodes.MOV_LIT_REG, ops.movLitReg],
+    [opCodes.MOV_MEM_REG, ops.movMemReg],
     [opCodes.MOV_REG_REG, ops.movRegReg],
     [opCodes.MOV_REG_MEM, ops.movRegMem],
-    [opCodes.ADD_REG_REG, ops.addRegMem],
+    [opCodes.ADD_REG_REG, ops.addRegReg],
     [opCodes.JMP_NOT_EQ, ops.jmpNotEq]
   ];
 
@@ -185,9 +197,13 @@ const startMemory = [
   R2,
 
   opCodes.ADD_REG_REG,
+  R1,
+  R2,
+
+  opCodes.MOV_REG_MEM,
   ACC,
   0x01,
-  0x00,
+  0x00, // 0x0100
 
   opCodes.JMP_NOT_EQ,
   0x00,
@@ -200,8 +216,20 @@ const loadedProgramState = mem.setBlock(0, startMemory, initialState);
 
 let currentState = loadedProgramState;
 
-for (let i = 0; i < 10; i++) {
+const rl = readline.createInterface({
+  input: process.stdin,
+  output: process.stdout
+});
+
+rl.on("line", () => {
   currentState = cpu.step(currentState);
   console.log(cpu.showRegisters(currentState).join("\n"));
+  console.log(
+    "mem: ",
+    mem
+      .show(0x0100, 0x0110, currentState)
+      .map(n => (n !== undefined ? n.toString(16) : "0"))
+      .join(" ")
+  );
   console.log("\n");
-}
+});
