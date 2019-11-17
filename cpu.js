@@ -14,7 +14,9 @@ const REGISTER_NAMES = [
   "r5",
   "r6",
   "r7",
-  "r8"
+  "r8",
+  "sp",
+  "fp"
 ];
 
 const REGISTER_COUNT = REGISTER_NAMES.length;
@@ -62,6 +64,26 @@ ops.addRegReg = state => {
   return cpu.setRegister("acc", registerValue1 + registerValue2, fetchedState);
 };
 
+ops.pshLit = state => {
+  const [fetchedState, value] = cpu.fetch16(state);
+  return cpu.push(value, fetchedState);
+};
+
+ops.pop = state => {
+  const [fetchedState, registerIndex] = cpu.fetchRegisterIndex(state);
+  console.log(cpu.getRegister("ip", fetchedState));
+  const [registerState, value] = cpu.pop(fetchedState);
+  return registerState.setIn(["registers", registerIndex], value);
+};
+
+ops.pshReg = state => {
+  const [fetchedState, registerIndex] = cpu.fetchRegisterIndex(state);
+  return cpu.push(
+    fetchedState.getIn(["registers", registerIndex]),
+    fetchedState
+  );
+};
+
 ops.jmpNotEq = state => {
   const [valueState, value] = cpu.fetch16(state);
   const [fetchedState, address] = cpu.fetch16(valueState);
@@ -77,10 +99,20 @@ ops.jmpNotEq = state => {
  *
  * @param {number} instruction
  */
-const getInstructionName = instruction => invert(opCodes)[instruction][0];
-console.log(getInstructionName(0x10));
+const getInstructionName = instruction => {
+  const inverted = invert(opCodes);
+  if (inverted[instruction]) {
+    return inverted[instruction][0];
+  }
+  return "NOOP";
+};
 
 const cpu = {};
+
+cpu.fetchRegisterIndex = state => {
+  const [fetchedState, rawIndex] = cpu.fetch(state);
+  return [fetchedState, rawIndex % REGISTER_COUNT];
+};
 
 cpu.getRegister = (name, state) => {
   const idx = REGISTER_NAMES.indexOf(name);
@@ -110,8 +142,29 @@ cpu.fetch16 = state => {
   ];
 };
 
+cpu.changeStack = (modification, state) => {
+  const prevStack = state.get("stackSize");
+  return state.set("stackSize", prevStack + modification);
+};
+
+cpu.push = (value, state) => {
+  const spAddress = cpu.getRegister("sp", state);
+  const memState = mem.set16(spAddress, value, state);
+  const withStackChange = cpu.changeStack(2, memState);
+  return cpu.setRegister("sp", spAddress - 2, withStackChange);
+};
+
+cpu.pop = state => {
+  const nextSpAddress = cpu.getRegister("sp", state) + 2;
+  const registerState = cpu.setRegister("sp", nextSpAddress, state);
+  const withStackChange = cpu.changeStack(-2, registerState);
+  return [registerState, mem.get16(nextSpAddress, withStackChange)];
+};
+
 cpu.showRegisters = state =>
-  REGISTER_NAMES.map(name => `${name}: ${cpu.getRegister(name, state)}`);
+  REGISTER_NAMES.map(
+    name => `${name}: ${cpu.getRegister(name, state).toString(16)}`
+  );
 
 cpu.execute = (instruction, state) => {
   const instructionMap = [
@@ -120,6 +173,9 @@ cpu.execute = (instruction, state) => {
     [opCodes.MOV_REG_REG, ops.movRegReg],
     [opCodes.MOV_REG_MEM, ops.movRegMem],
     [opCodes.ADD_REG_REG, ops.addRegReg],
+    [opCodes.PSH_LIT, ops.pshLit],
+    [opCodes.PSH_REG, ops.pshReg],
+    [opCodes.POP, ops.pop],
     [opCodes.JMP_NOT_EQ, ops.jmpNotEq]
   ];
 
@@ -130,7 +186,8 @@ cpu.execute = (instruction, state) => {
     [T, () => identity]
   ])(instruction);
 
-  console.log("instruction", instruction.toString(16));
+  console.log(getInstructionName(instruction));
+  // console.log("instruction", instruction.toString(16));
   return performInstruction(state);
 };
 
