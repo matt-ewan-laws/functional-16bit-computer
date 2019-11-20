@@ -1,4 +1,14 @@
-const { cond, equals, T, identity } = require("ramda");
+const {
+  cond,
+  equals,
+  T,
+  identity,
+  apply,
+  pipe,
+  partial,
+  tap,
+  range
+} = require("ramda");
 
 const opCodes = require("./instructions");
 const mem = require("./memory");
@@ -70,10 +80,13 @@ ops.pshLit = state => {
 };
 
 ops.pop = state => {
-  const [fetchedState, registerIndex] = cpu.fetchRegisterIndex(state);
-  console.log(cpu.getRegister("ip", fetchedState));
-  const [registerState, value] = cpu.pop(fetchedState);
-  return registerState.setIn(["registers", registerIndex], value);
+  const pipeline = [
+    state => cpu.fetchRegisterIndex(state),
+    ([state, registerIndex]) => [cpu.pop(state), registerIndex],
+    ([[state, value], registerIndex]) =>
+      state.setIn(["registers", registerIndex], value)
+  ];
+  return pipe(...pipeline)(state);
 };
 
 ops.pshReg = state => {
@@ -91,6 +104,30 @@ ops.jmpNotEq = state => {
     ? cpu.setRegister("ip", address, fetchedState)
     : fetchedState;
 };
+
+ops.calLit = state => {
+  const chain = [
+    state => cpu.fetch16(state),
+    ([state, address]) => [cpu.pushState(state), address],
+    ([state, address]) => cpu.setRegister("ip", address, state)
+  ];
+  return pipe(...chain)(state);
+};
+
+ops.calReg = state => {
+  const pipeline = [
+    state => cpu.fetchRegisterIndex(state),
+    ([state, registerIndex]) => [
+      state,
+      state.getIn(["registers", registerIndex])
+    ],
+    ([state, address]) => [cpu.pushState(state), address],
+    ([state, address]) => [cpu.setRegister(state, address)]
+  ];
+  return pipe(...pipeline)(state);
+};
+
+ops.ret = state => cpu.popState(state);
 
 // CPU functions
 // ---------------
@@ -121,7 +158,8 @@ cpu.getRegister = (name, state) => {
 
 cpu.setRegister = (name, value, state) => {
   const idx = REGISTER_NAMES.indexOf(name);
-  return state.setIn(["registers", idx], value);
+  const newState = state.setIn(["registers", idx], value);
+  return newState;
 };
 
 cpu.fetch = state => {
@@ -143,22 +181,80 @@ cpu.fetch16 = state => {
 };
 
 cpu.changeStack = (modification, state) => {
-  const prevStack = state.get("stackSize");
-  return state.set("stackSize", prevStack + modification);
+  const prevStack = state.get("stackFrameSize");
+  return state.set("stackFrameSize", prevStack + modification);
 };
 
 cpu.push = (value, state) => {
-  const spAddress = cpu.getRegister("sp", state);
-  const memState = mem.set16(spAddress, value, state);
-  const withStackChange = cpu.changeStack(2, memState);
-  return cpu.setRegister("sp", spAddress - 2, withStackChange);
+  const pipeline = [
+    state => [state, cpu.getRegister("sp", state)],
+    ([state, spAddress]) => [mem.set16(spAddress, value, state), spAddress],
+    ([state, spAddress]) => cpu.setRegister("sp", spAddress - 2, state),
+    state => cpu.changeStack(2, state)
+  ];
+  return pipe(...pipeline)(state);
+};
+
+cpu.pushState = state => {
+  const registers = ["r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8", "ip"];
+  const functions = [
+    ...registers.map(r => state => cpu.push(cpu.getRegister(r, state), state)),
+    state => cpu.push(state.get("stackFrameSize") + 2, state),
+    state => cpu.setRegister("fp", cpu.getRegister("sp", state), state)
+  ];
+  const pushAll = pipe(...functions);
+
+  return pushAll(state);
+};
+
+const popN = (n, state) => {
+  if (n > 0) {
+    const miniPop = s => cpu.pop(s)[0];
+    const fns = range(0, n).map(i => miniPop);
+    const popAll = pipe(...fns);
+    return popAll(state);
+  }
+  return state;
 };
 
 cpu.pop = state => {
-  const nextSpAddress = cpu.getRegister("sp", state) + 2;
-  const registerState = cpu.setRegister("sp", nextSpAddress, state);
-  const withStackChange = cpu.changeStack(-2, registerState);
-  return [registerState, mem.get16(nextSpAddress, withStackChange)];
+  const pipeline = [
+    state => [state, cpu.getRegister("sp", state) + 2],
+    ([state, nextSpAddress]) => [
+      cpu.setRegister("sp", nextSpAddress, state),
+      nextSpAddress
+    ],
+    ([state, nextSpAddress]) => [cpu.changeStack(-2, state), nextSpAddress],
+    ([state, nextSpAddress]) => [state, mem.get16(nextSpAddress, state)]
+  ];
+  return pipe(...pipeline)(state);
+};
+
+const popRegister = register => state => {
+  const [popped, val] = cpu.pop(state);
+  return cpu.setRegister(register, val, popped);
+};
+
+cpu.popState = state => {
+  const framePointerAddress = cpu.getRegister("fp", state);
+  const popRegisters = pipe(
+    ...["ip", "r8", "r7", "r6", "r5", "r4", "r3", "r2", "r1"].map(popRegister)
+  );
+
+  const pipeline = [
+    state => cpu.setRegister("sp", framePointerAddress, state),
+    state => cpu.pop(state),
+    ([state, stackFrameSize]) => {
+      return [popRegisters(state), stackFrameSize];
+    },
+    ([state, stackFrameSize]) => [cpu.pop(state), stackFrameSize],
+    ([[state, nArgs], stackFrameSize]) => {
+      return [popN(nArgs, state), stackFrameSize];
+    },
+    ([state, stackFrameSize]) =>
+      cpu.setRegister("fp", framePointerAddress + stackFrameSize, state)
+  ];
+  return pipe(...pipeline)(state);
 };
 
 cpu.showRegisters = state =>
@@ -176,7 +272,10 @@ cpu.execute = (instruction, state) => {
     [opCodes.PSH_LIT, ops.pshLit],
     [opCodes.PSH_REG, ops.pshReg],
     [opCodes.POP, ops.pop],
-    [opCodes.JMP_NOT_EQ, ops.jmpNotEq]
+    [opCodes.JMP_NOT_EQ, ops.jmpNotEq],
+    [opCodes.CAL_LIT, ops.calLit],
+    [opCodes.CAL_REG, ops.calReg],
+    [opCodes.RET, ops.ret]
   ];
 
   const makeCond = ([code, fn]) => [equals(code), () => fn];

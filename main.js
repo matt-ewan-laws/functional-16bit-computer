@@ -1,6 +1,6 @@
 const readline = require("readline");
 const { fromJS } = require("immutable");
-const { compose, partial } = require("ramda");
+const { compose, partial, pipe } = require("ramda");
 
 const mem = require("./memory");
 const cpu = require("./cpu");
@@ -19,7 +19,7 @@ const makeState = memSize => {
   return setRegisters(initial);
 };
 
-const initialState = makeState(512);
+const initialState = makeState(256 * 256);
 
 const history = [];
 
@@ -36,31 +36,76 @@ const R8 = 9;
 const SP = 10;
 const FP = 11;
 
+const subroutineAddress = 0x3000;
+
 const startMemory = [
-  opCodes.MOV_LIT_REG,
-  0x51,
-  0x51,
+  opCodes.PSH_LIT, // 0
+  0x33,
+  0x33,
+
+  opCodes.PSH_LIT, // 3
+  0x22,
+  0x22,
+
+  opCodes.PSH_LIT, // 6
+  0x11,
+  0x11,
+
+  opCodes.MOV_LIT_REG, // 9
+  0x12,
+  0x34,
   R1,
 
-  opCodes.MOV_LIT_REG,
-  0x42,
-  0x42,
-  R2,
+  opCodes.MOV_LIT_REG, // 13
+  0x56,
+  0x78,
+  R4,
 
-  opCodes.PSH_REG,
-  R1,
+  opCodes.PSH_LIT, // 17
+  0x00,
+  0x00,
 
-  opCodes.PSH_REG,
-  R2,
+  opCodes.CAL_LIT, // 20
+  (subroutineAddress & 0xff00) >> 8,
+  subroutineAddress & 0x00ff,
 
-  opCodes.POP,
-  R1,
-
-  opCodes.POP,
-  R2
+  opCodes.PSH_LIT, // 23
+  0x44,
+  0x44
 ];
 
-const loadedProgramState = mem.setBlock(0, startMemory, initialState);
+const subroutine = [
+  opCodes.PSH_LIT, // 26
+  0x01,
+  0x02,
+
+  opCodes.PSH_LIT, // 29
+  0x03,
+  0x04,
+
+  opCodes.PSH_LIT, // 32
+  0x05,
+  0x06,
+
+  opCodes.MOV_LIT_REG,
+  0x07,
+  0x08,
+  R1,
+
+  opCodes.MOV_LIT_REG,
+  0x09,
+  0x0a,
+  R8,
+
+  opCodes.RET
+];
+
+const loadedProgramState = pipe(
+  ...[
+    state => mem.setBlock(0, startMemory, state),
+    state => mem.setBlock(subroutineAddress, subroutine, state)
+  ]
+)(initialState);
 
 let currentState = loadedProgramState;
 
@@ -71,11 +116,20 @@ const rl = readline.createInterface({
 
 rl.on("line", () => {
   currentState = cpu.step(currentState);
+  const nextMem = cpu.getRegister("ip", currentState);
   console.log(cpu.showRegisters(currentState).join("\n"));
   console.log(
-    "mem: ",
+    `mem: (${nextMem.toString(16)}) `,
     mem
-      .show(500, 12, currentState)
+      .show(nextMem, 40, currentState)
+      .map(n => (n !== undefined ? n.toString(16) : "0"))
+      .join(" ")
+  );
+  const peekAt = 0xffff - 1 - 42;
+  console.log(
+    `mem: (${peekAt.toString(16)})`,
+    mem
+      .show(peekAt, 44, currentState)
       .map(n => (n !== undefined ? n.toString(16) : "0"))
       .join(" ")
   );

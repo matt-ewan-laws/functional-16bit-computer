@@ -7,5 +7,8 @@ module.exports = {
   JMP_NOT_EQ: 0x15,
   PSH_LIT: 0x17,
   PSH_REG: 0x18,
-  POP: 0x19
+  POP: 0x1a,
+  CAL_LIT: 0x5e,
+  CAL_REG: 0x5f,
+  RET: 0x60
 };
